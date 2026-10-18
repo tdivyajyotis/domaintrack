@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+<meta name="googlebot" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Domain expiry</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%AD%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f3f4f6; --card:#ffffff; --fg:#17202b; --mute:#5f6b7a; --line:#d8dce3; --accent:#2b5fd9;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f1318; --card:#171c24; --fg:#e7eaef; --mute:#8d98a8; --line:#262e39; --accent:#7ea2ff}
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-variant-numeric:tabular-nums;
+  padding:max(20px,env(safe-area-inset-top)) 16px 48px;
+}
+main{max-width:760px;margin:0 auto}
+h1{font-size:1.5rem;font-weight:650;letter-spacing:-.01em;margin:24px 0 4px}
+.lede{color:var(--mute);margin:0 0 20px;font-size:.95rem;min-height:1.4em}
+form{display:flex;gap:8px;margin-bottom:12px}
+input[type=text]{
+  flex:1;min-width:0;padding:10px 12px;font:inherit;color:var(--fg);
+  background:var(--card);border:1px solid var(--line);border-radius:8px;
+}
+button{
+  font:inherit;padding:10px 14px;border-radius:8px;border:1px solid var(--line);
+  background:var(--card);color:var(--fg);cursor:pointer;
+}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 12px;color:var(--mute);font-size:.85rem}
+.bar button{padding:6px 10px;font-size:.85rem}
+#list{display:flex;flex-direction:column;gap:8px}
+.row{
+  --h:130;
+  display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:12px;
+  padding:12px 12px 12px 16px;border-radius:10px;border:1px solid var(--line);
+  border-left:6px solid hsl(var(--h) 70% 46%);
+  background-color:var(--card);
+  background-image:linear-gradient(hsl(var(--h) 80% 50% / .14),hsl(var(--h) 80% 50% / .14));
+}
+.row.expired{border-left-color:hsl(335 75% 42%);background-image:linear-gradient(hsl(335 80% 45% / .24),hsl(335 80% 45% / .24))}
+.row.pending{--h:215;background-image:none;opacity:.8}
+.dom{font-weight:600;overflow-wrap:anywhere}
+.sub{color:var(--mute);font-size:.85rem}
+.err{color:hsl(0 65% 50%)}
+.when{text-align:right;font-weight:650;font-size:1.05rem;white-space:nowrap}
+.when small{display:block;font-weight:400;color:var(--mute);font-size:.8rem}
+.x{padding:4px 9px;font-size:1rem;line-height:1;border-color:transparent;background:transparent;color:var(--mute)}
+.x:hover{color:var(--fg);border-color:var(--line)}
+.empty{padding:28px;text-align:center;color:var(--mute);border:1px dashed var(--line);border-radius:10px}
+footer{margin-top:24px;color:var(--mute);font-size:.8rem}
+@media (max-width:520px){
+  .row{grid-template-columns:1fr auto}
+  .row .x{grid-column:2;grid-row:1;justify-self:end}
+  .when{grid-column:1/-1;text-align:left;display:flex;gap:8px;align-items:baseline}
+  .when small{display:inline}
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>Domain expiry</h1>
+  <p class="lede" id="summary"></p>
+
+  <form id="add" autocomplete="off">
+    <input type="text" id="inp" placeholder="example.com (several at once is fine)" aria-label="Domains to add" spellcheck="false" autocapitalize="off">
+    <button class="primary" type="submit">Add</button>
+  </form>
+
+  <div class="bar">
+    <span id="checked"></span>
+    <button type="button" id="refresh">Refresh all</button>
+  </div>
+
+  <div id="list" aria-live="polite"></div>
+
+  <footer>Expiry dates come from RDAP (via rdap.org) and reflect the registry's record. Added domains are saved in this browser only.</footer>
+</main>
+
+<script>
+// Domains listed here are shared across every device that loads the page.
+// Commit them to the repo; anything you add in the UI stays in this browser.
+const PINNED = [];
+
+const LS_D = 'domx.domains', LS_C = 'domx.cache', TTL = 12 * 3600e3;
+const load = (k, f) => { try { return JSON.parse(localStorage.getItem(k)) ?? f } catch { return f } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} };
+
+let local = load(LS_D, []);
+let cache = load(LS_C, {});
+const loading = new Set();
+
+const all = () => [...new Set([...PINNED, ...local])];
+const norm = s => s.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/?#].*$/, '').replace(/\.$/, '');
+const valid = d => /^([a-z0-9-]+\.)+[a-z0-9-]{2,}$/.test(d);
+
+// ---------- RDAP ----------
+async function lookup(d) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
+  try {
+    const r = await fetch('https://rdap.org/domain/' + encodeURIComponent(d),
+      { headers: { Accept: 'application/rdap+json' }, signal: c.signal });
+    if (r.status === 404) throw new Error('Not found in RDAP (unregistered, or this TLD has no RDAP)');
+    if (!r.ok) throw new Error('RDAP returned HTTP ' + r.status);
+    const j = await r.json();
+    const e = (j.events || []).find(e => e.eventAction === 'expiration');
+    if (!e) throw new Error('No expiration date in the RDAP response');
+    return { expiry: e.eventDate, checked: Date.now() };
+  } catch (err) {
+    throw new Error(err.name === 'AbortError' ? 'Timed out'
+      : err.message === 'Failed to fetch' ? 'Blocked or unreachable (the registry may not allow browser requests)'
+      : err.message);
+  } finally { clearTimeout(t) }
+}
+
+async function refresh(list, force) {
+  const todo = list.filter(d => force || !cache[d] || cache[d].error || Date.now() - cache[d].checked > TTL);
+  let i = 0;
+  await Promise.all(Array.from({ length: 3 }, async () => {
+    while (i < todo.length) {
+      const d = todo[i++];
+      loading.add(d); render();
+      try { cache[d] = await lookup(d) }
+      catch (e) { cache[d] = { error: e.message, checked: Date.now(), expiry: cache[d]?.expiry } }
+      loading.delete(d); save(LS_C, cache); render();
+    }
+  }));
+}
+
+// ---------- time ----------
+const plural = (n, u) => n + ' ' + u + (n === 1 ? '' : 's');
+function span(a, b) {
+  let y = b.getFullYear() - a.getFullYear(), m = b.getMonth() - a.getMonth(), d = b.getDate() - a.getDate();
+  if (d < 0) { m--; d += new Date(b.getFullYear(), b.getMonth(), 0).getDate() }
+  if (m < 0) { y--; m += 12 }
+  return [y, m, d];
+}
+function human(exp) {
+  const now = new Date(), past = exp < now, [a, b] = past ? [exp, now] : [now, exp], ms = b - a;
+  let txt;
+  if (ms < 864e5) { const h = Math.floor(ms / 36e5); txt = h >= 1 ? plural(h, 'hour') : 'under an hour' }
+  else {
+    const [y, m, d] = span(a, b);
+    txt = [[y, 'year'], [m, 'month'], [d, 'day']].filter(x => x[0] > 0).slice(0, 2).map(x => plural(...x)).join(', ');
+  }
+  return { txt, past };
+}
+
+// days left -> hue: red (0) through orange, amber, yellow to green (135)
+const STOPS = [[0, 0], [7, 5], [30, 28], [60, 45], [90, 60], [180, 95], [365, 135]];
+function hue(days) {
+  if (days >= 365) return 135;
+  for (let i = 1; i < STOPS.length; i++) {
+    if (days <= STOPS[i][0]) {
+      const [d0, h0] = STOPS[i - 1], [d1, h1] = STOPS[i];
+      return h0 + (h1 - h0) * (days - d0) / (d1 - d0);
+    }
+  }
+  return 135;
+}
+
+// ---------- render ----------
+const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e };
+
+function render() {
+  const list = $('#list'); list.replaceChildren();
+  const now = Date.now();
+  const items = all().map(d => {
+    const c = cache[d] || {};
+    return { d, c, t: c.expiry ? new Date(c.expiry).getTime() : null };
+  }).sort((a, b) => (a.t ?? Infinity) - (b.t ?? Infinity) || a.d.localeCompare(b.d));
+
+  if (!items.length) list.append(el('div', 'empty', 'No domains yet. Add one above to check when it expires.'));
+
+  for (const { d, c, t } of items) {
+    const row = el('div', 'row');
+    const main = el('div'); main.append(el('div', 'dom', d));
+    const sub = el('div', 'sub');
+    const when = el('div', 'when');
+
+    if (t != null) {
+      const days = (t - now) / 864e5, h = human(new Date(t));
+      if (days <= 0) row.classList.add('expired'); else row.style.setProperty('--h', hue(days).toFixed(0));
+      when.textContent = h.past ? 'Expired' : h.txt;
+      const s = el('small', null, h.past ? h.txt : 'left'); when.append(s);
+      sub.textContent = new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+      if (c.error) { sub.append(' · '); sub.append(el('span', 'err', 'refresh failed: ' + c.error)) }
+    } else {
+      row.classList.add('pending');
+      if (loading.has(d)) { sub.textContent = 'Checking…'; when.textContent = '…' }
+      else if (c.error) { sub.append(el('span', 'err', c.error)); when.textContent = 'Unknown' }
+      else { sub.textContent = 'Not checked yet'; when.textContent = '–' }
+    }
+    main.append(sub);
+    row.append(main, when);
+
+    if (!PINNED.includes(d)) {
+      const x = el('button', 'x', '×'); x.type = 'button';
+      x.setAttribute('aria-label', 'Remove ' + d); x.title = 'Remove';
+      x.onclick = () => { local = local.filter(v => v !== d); delete cache[d]; save(LS_D, local); save(LS_C, cache); render() };
+      row.append(x);
+    }
+    list.append(row);
+  }
+
+  const known = items.filter(i => i.t != null);
+  const next = known.find(i => i.t > now) || known[0];
+  $('#summary').textContent = items.length
+    ? (next ? `${items.length} domain${items.length === 1 ? '' : 's'}. Soonest: ${next.d}, ${human(new Date(next.t)).past ? 'already expired' : human(new Date(next.t)).txt}.`
+            : `${items.length} domain${items.length === 1 ? '' : 's'}.`)
+    : '';
+  const last = Math.max(0, ...items.map(i => i.c.checked || 0));
+  $('#checked').textContent = last ? 'Last checked ' + new Date(last).toLocaleString() : '';
+}
+
+function $(s) { return document.querySelector(s) }
+
+$('#add').addEventListener('submit', e => {
+  e.preventDefault();
+  const raw = $('#inp').value.split(/[\s,;]+/).map(norm).filter(Boolean);
+  const bad = raw.filter(d => !valid(d));
+  const fresh = [...new Set(raw.filter(valid))].filter(d => !all().includes(d));
+  if (fresh.length) { local.push(...fresh); save(LS_D, local) }
+  $('#inp').value = bad.join(' ');
+  if (bad.length) $('#inp').placeholder = 'Not valid: ' + bad.join(', ');
+  render();
+  if (fresh.length) refresh(fresh, true);
+});
+$('#refresh').addEventListener('click', () => refresh(all(), true));
+
+render();
+refresh(all(), false);
+setInterval(render, 60000);
+</script>
+</body>
+</html>
